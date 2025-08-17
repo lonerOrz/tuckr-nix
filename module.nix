@@ -1,17 +1,15 @@
-# module.nix
 {
   config,
   lib,
   pkgs,
   ...
 }:
-
 with lib;
 
 let
   cfg = config.tuckr;
 
-  # 设置环境变量来运行tuckr
+  # 脚本：运行 tuckr 并调用 ./tuckr.py
   userTuckrActivatorScript = pkgs.writeShellScript "user-tuckr-activator" ''
     tuckr_bin_path="$1"
     dot_path_raw="$2"
@@ -19,7 +17,7 @@ let
     disabled_groups_csv="$4"
 
     if [[ "$dot_path_raw" == "~"* ]]; then
-      export TUCKR_HOME="$HOME/${dot_path_raw: 1}"
+      export TUCKR_HOME="$HOME/''${dot_path_raw: 1}"
     else
       export TUCKR_HOME="$dot_path_raw"
     fi
@@ -32,7 +30,11 @@ let
     echo "  TUCKR_TARGET: $$TUCKR_TARGET"
     echo "  TUCKR_BACKUP_SUFFIX: $$TUCKR_BACKUP_SUFFIX"
     echo "  TUCKR_DISABLED_GROUPS: $$TUCKR_DISABLED_GROUPS"
-    echo "  tuckr binary: $$tuckr_bin_path"
+    echo "  tuckr binary: $tuckr_bin_path"
+
+    # Add tuckr's directory to the PATH so the python script can find it
+    tuckr_bin_dir=$(dirname "$tuckr_bin_path")
+    export PATH="$tuckr_bin_dir:$PATH"
 
     PYTHON_ARGS=()
     PYTHON_ARGS+=(--suffix "$backup_suffix")
@@ -44,7 +46,7 @@ let
     fi
 
     if [ -x "$tuckr_bin_path" ]; then
-      "$tuckr_bin_path" status --json | "${pkgs.python3}/bin/python3" "$${cfg.autoResolveScript}" "$${PYTHON_ARGS[@]}"
+      "$tuckr_bin_path" status --json | "${pkgs.python3}/bin/python3" "${./tuckr.py}" "''${PYTHON_ARGS[@]}"
       if [ $$? -ne 0 ]; then
         echo "Error: tuckr auto-resolution failed for user $$USER." >&2
       fi
@@ -58,12 +60,6 @@ in
 {
   options.tuckr = {
     enable = mkEnableOption "Enable multi-user tuckr management";
-
-    autoResolveScript = mkOption {
-      type = types.path;
-      default = /etc/nixos/tuckr_auto_resolve.py;
-      description = "Absolute path to the tuckr_auto_resolve.py script.";
-    };
 
     users = mkOption {
       type = types.attrsOf (
@@ -101,49 +97,52 @@ in
   };
 
   config = mkIf cfg.enable {
-    systemd.user.services."tuckr-auto-resolver@" = {
-      description = "Tuckr Auto Resolver for %i";
-      serviceConfig = {
-        Type = "oneshot";
-        ExecStart = "${pkgs.coreutils}/bin/true";
+    # 用户级 systemd 服务模板
+    systemd.user.services = lib.mapAttrs' (username: userConfig: {
+      name = "tuckr-auto-resolver@${username}";
+      value = lib.mkIf userConfig.enable {
+        description = "Tuckr Auto Resolver for ${username}";
+        wantedBy = [ "default.target" ];
+        serviceConfig = {
+          Type = "oneshot";
+          ExecStart = "${pkgs.coreutils}/bin/true";
+        };
       };
-    };
+    }) cfg.users;
 
+    # rebuild 后自动激活
     system.activationScripts.postRebuildTuckr = lib.mkAfter ''
       echo "Activating multi-user tuckr management..."
       ${lib.concatStringsSep "\n" (
         lib.mapAttrsToList (
           username: userConfig:
-          lib.optionalString userConuserTuckrActivatorScriptfig.enable ''
-                      echo "  Enabling linger for user ${username}..."
-                      ${pkgs.loginctl}/bin/loginctl enable-linger ${username} || true
+          let
+            groups_csv_str = lib.concatStringsSep "," (
+              lib.filter (s: s != "") (
+                builtins.attrValues (lib.mapAttrs (n: v: if v.enable then n else "") userConfig.group)
+              )
+            );
+          in
+          lib.optionalString userConfig.enable ''
+                        echo "  Enabling linger for user ${username}..."
+                        ${pkgs.systemd}/bin/loginctl enable-linger ${username} || true
 
-                      echo "  Preparing systemd user service override for ${username}..."
-                      override_dir="/run/systemd/user/tuckr-auto-resolver@${username}.service.d"
-                      override_file="$override_dir/override.conf"
-                      ${pkgs.sudo}/bin/sudo -u ${username} ${pkgs.coreutils}/bin/mkdir -p "$override_dir"
+                        echo "  Preparing systemd user service override for ${username}..."
+                        override_dir="/run/systemd/user/tuckr-auto-resolver@${username}.service.d"
+                        override_file="$override_dir/override.conf"
+                        ${pkgs.coreutils}/bin/mkdir -p "$override_dir"
 
-                      exec_start_cmd="${userTuckrActivatorScript} \
-                        ${lib.escapeShellArg "${userConfig.package}/bin/tuckr"} \
-                        ${lib.escapeShellArg userConfig.dotPath} \
-                        ${lib.escapeShellArg userConfig.backupSuffix} \
-                        ${
-                          lib.escapeShellArg (
-                            lib.concatStringsSep "," (
-                              builtins.attrValues (lib.mapAttrs (_: v: if v.enable then _ else "") userConfig.group)
-                            )
-                          )
-                        }"
+                        groups_csv="${groups_csv_str}"
 
-                      ${pkgs.sudo}/bin/sudo -u ${username} ${pkgs.coreutils}/bin/tee "$override_file" > /dev/null <<EOF
+                        exec_start_cmd="${userTuckrActivatorScript} ${pkgs.tuckr}/bin/tuckr ${userConfig.dotPath} ${userConfig.backupSuffix} ${groups_csv_str}"
+
+                        ${pkgs.coreutils}/bin/tee "$override_file" > /dev/null <<EOF
             [Service]
             ExecStart=
-            ExecStart=${exec_start_cmd}
+            ExecStart=''${exec_start_cmd}
             EOF
-
-                      ${pkgs.sudo}/bin/sudo -u ${username} ${pkgs.systemd}/bin/systemctl --user daemon-reload
-                      ${pkgs.sudo}/bin/sudo -u ${username} ${pkgs.systemd}/bin/systemctl --user start tuckr-auto-resolver@${username}.service
           ''
+
         ) cfg.users
       )}
       echo "Multi-user tuckr management activation complete."
