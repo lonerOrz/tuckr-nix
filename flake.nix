@@ -25,25 +25,9 @@
       ];
 
       perSystem =
+        { pkgs, self', ... }:
         {
-          config,
-          self',
-          inputs',
-          pkgs,
-          system,
-          ...
-        }:
-        let
-          lib = pkgs.lib;
-        in
-        {
-          packages = {
-            default = pkgs.tuckr;
-          };
-
-          nixosModules = {
-            tuckrModule = import ./module.nix { inherit pkgs; };
-          };
+          packages.default = pkgs.callPackage ./tuckr.nix { };
 
           devShells.default = pkgs.mkShell {
             inputsFrom = [ self'.packages.default ];
@@ -56,7 +40,7 @@
               clippy
               cargo-watch
               cargo-criterion
-              # python
+              # Python
               python3
             ];
           };
@@ -69,5 +53,9 @@
             };
           };
         };
+
+      flake = {
+        tuckrModules.default = import ./module.nix;
+      };
     };
 }
