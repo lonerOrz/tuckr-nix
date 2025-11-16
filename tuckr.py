@@ -38,20 +38,80 @@ COLOR_CYAN = "\033[96m"
 
 
 class ColorFormatter(logging.Formatter):
-    """自定义颜色日志格式化器"""
+    """更美观的自定义颜色日志格式化器，使用符号前缀"""
 
-    COLORS = {
-        logging.DEBUG: COLOR_CYAN,
-        logging.INFO: COLOR_GREEN,
-        logging.WARNING: COLOR_YELLOW,
-        logging.ERROR: COLOR_RED,
-        logging.CRITICAL: COLOR_BOLD + COLOR_RED,
-    }
+    def __init__(self, use_color=True):
+        super().__init__()
+        self.use_color = use_color
 
     def format(self, record):
-        color = self.COLORS.get(record.levelno, "")
-        message = super().format(record)
-        return f"{color}{message}{COLOR_RESET}"
+        level_map = {
+            logging.DEBUG: (COLOR_CYAN, "[*]"),
+            logging.INFO: (COLOR_GREEN, "[+]"),
+            logging.WARNING: (COLOR_YELLOW, "[!]"),
+            logging.ERROR: (COLOR_RED, "[-]"),
+            logging.CRITICAL: (COLOR_BOLD + COLOR_RED, "[!!!]"),
+        }
+
+        if self.use_color:
+            color, prefix = level_map.get(record.levelno, (COLOR_RESET, "[?]"))
+            # Add bold to the prefix
+            prefix = f"{color}{COLOR_BOLD}{prefix}{COLOR_RESET}"
+        else:
+            # No color, just the prefix text
+            _, prefix = level_map.get(record.levelno, "[?]")
+
+        # Create the final message
+        formatter = logging.Formatter(f"{prefix} %(message)s")
+
+        return formatter.format(record)
+
+
+class Stats:
+    """封装统计信息，提供增加、查询和打印摘要的方法"""
+
+    def __init__(self):
+        self.data = {
+            "symlinked_printed": 0,
+            "not_symlinked_processed": 0,
+            "conflicts_processed": 0,
+            "renamed_folders": 0,
+            "renamed_files": 0,
+            "added_groups": 0,
+            "unsupported_printed": 0,
+            "non_existent_printed": 0,
+            "skipped_excluded": 0,
+            "errors": 0,
+            "warnings": 0,
+        }
+
+    def increment(self, key, value=1):
+        """增加一个统计项"""
+        if key in self.data:
+            self.data[key] += value
+        else:
+            logging.warning(f"试图增加一个不存在的统计项: {key}")
+
+    def get(self, key):
+        """获取一个统计项的值"""
+        return self.data.get(key, 0)
+
+    def log_summary(self):
+        """打印最终的统计摘要"""
+        logging.info("处理摘要:")
+        logging.info(
+            "总处理的组数: %s",
+            self.get("not_symlinked_processed") + self.get("conflicts_processed"),
+        )
+        logging.info("成功添加/链接的组数: %s", self.get("added_groups"))
+        logging.info("为备份重命名的文件夹: %s", self.get("renamed_folders"))
+        logging.info("为备份重命名的文件: %s", self.get("renamed_files"))
+        if self.get("skipped_excluded") > 0:
+            logging.warning("因排除而跳过的组: %s", self.get("skipped_excluded"))
+        if self.get("warnings") > 0:
+            logging.warning("总警告数: %s", self.get("warnings"))
+        if self.get("errors") > 0:
+            logging.error("总错误数: %s", self.get("errors"))
 
 
 def setup_logging(verbose: bool = False, use_color: bool | None = None) -> None:
@@ -63,17 +123,18 @@ def setup_logging(verbose: bool = False, use_color: bool | None = None) -> None:
         use_color = sys.stdout.isatty()
 
     handler = logging.StreamHandler(sys.stdout)
-    formatter = (
-        ColorFormatter("%(levelname)s: %(message)s")
-        if use_color
-        else logging.Formatter("%(levelname)s: %(message)s")
-    )
-    handler.setFormatter(formatter)
+    handler.setFormatter(ColorFormatter(use_color=use_color))
 
     root = logging.getLogger()
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(logging.DEBUG if verbose else logging.INFO)
+
+
+def _log_and_count_error(stats, message, *args):
+    """记录错误日志并增加错误计数"""
+    logging.error(message, *args)
+    stats.increment("errors")
 
 
 def _run_tuckr_add(group_name, exclude_groups, stats, is_conflict_resolution=False):
@@ -90,19 +151,19 @@ def _run_tuckr_add(group_name, exclude_groups, stats, is_conflict_resolution=Fal
         completed = subprocess.run(cmd, check=True, capture_output=True, text=True)
         logging.debug("命令输出:\n%s", completed.stdout.strip())
         logging.info(f"  成功执行 'tuckr add {group_name}'。")
-        stats["added_groups"] += 1
+        stats.increment("added_groups")
         return True
     except subprocess.CalledProcessError as e:
         # 在冲突解决过程中，tuckr 命令失败是预期的行为，不视为错误
         if not is_conflict_resolution:
-            logging.error(
+            _log_and_count_error(
+                stats,
                 "  执行 'tuckr add %s' 时出错 (返回码 %s): %s",
                 group_name,
                 e.returncode,
                 e.stderr.strip(),
             )
             logging.debug("命令标准输出 (部分):\n%s", (e.stdout or "").strip())
-            stats["errors"] += 1
         else:
             logging.info(
                 "  'tuckr add %s' 未成功 (预期的行为): %s",
@@ -111,10 +172,9 @@ def _run_tuckr_add(group_name, exclude_groups, stats, is_conflict_resolution=Fal
             )
         return False
     except FileNotFoundError:
-        logging.error(
-            "  在PATH中找不到 'tuckr'。请确保已安装二进制文件并设置PATH。"
+        _log_and_count_error(
+            stats, "  在PATH中找不到 'tuckr'。请确保已安装二进制文件并设置PATH。"
         )
-        stats["errors"] += 1
         return False
 
 
@@ -133,14 +193,14 @@ def _handle_project_folder_backup(
     try:
         os.rename(original_path, backup_path)
         logging.info("  成功将 '%s' 重命名为 '%s'。", original_path, backup_path)
-        stats["renamed_folders"] += 1
+        stats.increment("renamed_folders")
     except Exception as e:
-        logging.error(
+        _log_and_count_error(
+            stats,
             "  重命名 '%s' 时出错: %s。跳过此组的 tuckr add。",
             original_path,
             e,
         )
-        stats["errors"] += 1
         return False  # 表示失败
 
     logging.warning(
@@ -151,218 +211,207 @@ def _handle_project_folder_backup(
     return _run_tuckr_add(group_name, exclude_groups, stats, is_conflict_resolution=True)
 
 
+def _process_symlinked_groups(status_data, stats):
+    """处理并记录已链接的组"""
+    symlinked_groups = status_data.get("symlinked", [])
+    if symlinked_groups:
+        logging.info("已成功链接的组: %s", ", ".join(symlinked_groups))
+        stats.increment("symlinked_printed", len(symlinked_groups))
+
+
+def _process_unsupported_groups(status_data, stats):
+    """处理并记录不支持的组"""
+    unsupported_groups = status_data.get("unsupported", [])
+    if unsupported_groups:
+        for group in unsupported_groups:
+            logging.warning("组 '%s' 不支持当前平台/条件", group)
+            stats.increment("unsupported_printed")
+
+
+def _process_non_existent_groups(status_data, stats):
+    """处理并记录不存在的组"""
+    non_existent_groups = status_data.get("nonexistent", []) or status_data.get(
+        "non_existent", []
+    )
+    if non_existent_groups:
+        for group in non_existent_groups:
+            logging.warning("组 '%s' 不存在 (检查拼写或缺失的dotfiles)", group)
+            stats.increment("non_existent_printed")
+
+
+def _get_detailed_group_status(group, stats):
+    """获取单个组的详细状态，处理潜在的错误"""
+    try:
+        detailed_result = subprocess.run(
+            ["tuckr", "status", group, "--json"],
+            capture_output=True,
+            text=True,
+        )
+        if detailed_result.stdout:
+            return json.loads(detailed_result.stdout)
+        else:
+            logging.warning("无法获取组 '%s' 的状态输出", group)
+            stats.increment("warnings")
+            return None
+    except json.JSONDecodeError as e:
+        _log_and_count_error(stats, "解码组 '%s' 的详细JSON时出错: %s", group, e)
+        return None
+    except FileNotFoundError:
+        _log_and_count_error(stats, "为组 '%s' 获取状态时找不到 'tuckr' 命令", group)
+        return None
+
+
+def _find_project_folder(group, conflict_list):
+    """从冲突文件路径推断项目文件夹"""
+    first_target_path = conflict_list[0]["target_path"]
+    project_folder_path = os.path.dirname(first_target_path)
+    # 尝试向上查找直到找到包含组名的目录
+    while project_folder_path != "/":
+        if os.path.basename(project_folder_path) == group:
+            return project_folder_path
+        project_folder_path = os.path.dirname(project_folder_path)
+    return None
+
+
+def _attempt_conflict_resolution(group, backup_suffix, exclude_groups, stats):
+    """
+    尝试通过重命名和重新链接来解决组的冲突。
+
+    之所以需要多次重试，是因为一个组可能在多个不相关的目录中存在冲突
+    （例如，一个在 ~/.config/，另一个在 ~/.local/share/）。
+    每次循环解决一个主要的冲突目录，然后重新获取状态，直到所有冲突都解决。
+    """
+    # 初始状态获取
+    detailed_status = _get_detailed_group_status(group, stats)
+    if not detailed_status:
+        return
+
+    # 设置最大重试次数以防止无限循环。
+    # 这个值是一个固定的安全上限，通常足以处理具有多个冲突点的复杂组。
+    max_retries = 5
+    retry_count = 0
+    while retry_count < max_retries:
+        group_conflicts = detailed_status.get("conflicts", {}).get(group, [])
+        if not group_conflicts:
+            logging.info("  组 '%s' 的冲突已解决", group)
+            stats.increment("not_symlinked_processed")
+            return
+
+        project_folder = _find_project_folder(group, group_conflicts)
+        if project_folder:
+            logging.debug("  检测到项目文件夹: %s", project_folder)
+            _handle_project_folder_backup(
+                project_folder, group, backup_suffix, exclude_groups, stats
+            )
+        else:
+            logging.warning("无法找到组 '%s' 的项目根目录", group)
+            stats.increment("warnings")
+            return  # 无法解决，退出
+
+        # 重新获取状态以检查冲突是否解决
+        detailed_status = _get_detailed_group_status(group, stats)
+        if not detailed_status:
+            return  # 无法获取状态，退出
+
+        retry_count += 1
+
+    # 最后检查一次
+    if not detailed_status.get("conflicts", {}).get(group, []):
+        logging.info("  组 '%s' 的冲突已解决", group)
+        stats.increment("not_symlinked_processed")
+    else:
+        logging.warning("  组 '%s' 可能仍有冲突未能解决", group)
+
+
+def _handle_single_unlinked_group(group, backup_suffix, exclude_groups, stats):
+    """处理单个未链接的组：检查冲突或直接链接"""
+    detailed_status = _get_detailed_group_status(group, stats)
+    if not detailed_status:
+        return
+
+    group_conflicts = detailed_status.get("conflicts", {}).get(group)
+
+    if group_conflicts:
+        logging.info("处理冲突组: %s", group)
+        _attempt_conflict_resolution(group, backup_suffix, exclude_groups, stats)
+    else:
+        logging.info("链接组: %s", group)
+        if _run_tuckr_add(group, exclude_groups, stats, is_conflict_resolution=False):
+            logging.debug("成功链接 %s", group)
+            stats.increment("not_symlinked_processed")
+
+
+def _process_not_symlinked_groups(status_data, backup_suffix, exclude_groups, stats):
+    """处理所有未链接的组"""
+    not_symlinked_groups = status_data.get("not_symlinked", [])
+    logging.debug("未链接组数量: %d", len(not_symlinked_groups))
+    for group in not_symlinked_groups:
+        if group in exclude_groups:
+            logging.warning("跳过排除的组 '%s'", group)
+            stats.increment("skipped_excluded")
+            continue
+        _handle_single_unlinked_group(group, backup_suffix, exclude_groups, stats)
+
+
 def process_conflicts(json_input_str, backup_suffix, exclude_groups):
     """
     处理JSON状态，执行备份/重命名，并尝试链接dotfiles
     """
-    # 初始化统计信息
-    stats = {
-        "symlinked_printed": 0,  # 已链接并打印的组数
-        "not_symlinked_processed": 0,  # 已处理的未链接组数
-        "conflicts_processed": 0,  # 已处理的冲突组数
-        "renamed_folders": 0,  # 已重命名的文件夹数
-        "renamed_files": 0,  # 已重命名的文件数
-        "added_groups": 0,  # 已成功添加的组数
-        "unsupported_printed": 0,  # 已打印的不支持组数
-        "non_existent_printed": 0,  # 已打印的不存在组数
-        "skipped_excluded": 0,  # 因排除而跳过的组数
-        "errors": 0,  # 错误数
-        "warnings": 0,  # 警告数
-    }
-
+    stats = Stats()
     try:
         status_data = json.loads(json_input_str)
         logging.debug("解析的JSON键: %s", list(status_data.keys()))
     except json.JSONDecodeError as e:
-        logging.error("解码JSON输入时出错: %s", e)
-        stats["errors"] += 1
+        _log_and_count_error(stats, "解码JSON输入时出错: %s", e)
+        stats.log_summary()
         return stats
 
-    # 首先打印已成功链接的组
-    symlinked_groups = status_data.get("symlinked", [])
-    logging.debug("已链接组数量: %d", len(symlinked_groups))
-    if symlinked_groups:
-        logging.info("已成功链接的组: %s", ", ".join(symlinked_groups))
-        for group in symlinked_groups:
-            stats["symlinked_printed"] += 1
+    _process_symlinked_groups(status_data, stats)
+    _process_not_symlinked_groups(status_data, backup_suffix, exclude_groups, stats)
+    _process_unsupported_groups(status_data, stats)
+    _process_non_existent_groups(status_data, stats)
 
-    # 处理未链接的组
-    not_symlinked_groups = status_data.get("not_symlinked", [])
-
-    logging.debug("未链接组数量: %d", len(not_symlinked_groups))
-
-    if not_symlinked_groups:
-        for group in not_symlinked_groups:
-            if group in exclude_groups:
-                logging.warning("跳过排除的组 '%s'", group)
-                stats["skipped_excluded"] += 1
-                continue
-
-            # 获取此特定组的详细状态
-            try:
-                # 注意：即使tuckr返回错误码，我们也想获取其输出
-                detailed_result = subprocess.run(
-                    ["tuckr", "status", group, "--json"],
-                    capture_output=True,
-                    text=True,
-                )
-
-                # 即使返回码非0，我们仍然尝试解析输出
-                if detailed_result.stdout:
-                    detailed_status = json.loads(detailed_result.stdout)
-
-                    # 提取此组的冲突详情
-                    group_conflicts = detailed_status.get("conflicts", {})
-
-                    # 检查是否有冲突
-                    if (
-                        isinstance(group_conflicts, dict) and group in group_conflicts
-                    ):
-                        conflict_list = group_conflicts[group]
-
-                        # 如果有冲突，则备份整个项目文件夹并重新链接
-                        if conflict_list:
-                            logging.info("处理冲突组: %s", group)
-
-                            # 循环处理，直到没有冲突或达到最大重试次数
-                            max_retries = min(5, len(conflict_list))  # 重试次数不超过冲突数和最大次数中的较小值
-                            retry_count = 0
-
-                            while retry_count < max_retries:
-                                conflict_list = group_conflicts.get(group, [])
-
-                                if not conflict_list:
-                                    # 没有冲突了，跳出循环
-                                    logging.info("  组 '%s' 的冲突已解决", group)
-                                    stats["not_symlinked_processed"] += 1
-                                    break
-
-                                # 从第一个冲突文件路径推断整个项目文件夹
-                                first_target_path = conflict_list[0]["target_path"]
-                                project_folder_path = os.path.dirname(first_target_path)
-
-                                # 尝试向上查找直到找到包含组名的目录
-                                # 例如，如果冲突是 ~/.config/nvim/init.lua，我们查找 ~/.config/nvim
-                                while project_folder_path != "/":
-                                    if os.path.basename(project_folder_path) == group:
-                                        break
-                                    project_folder_path = os.path.dirname(
-                                        project_folder_path
-                                    )
-
-                                if project_folder_path != "/":
-                                    logging.debug(
-                                        "  检测到项目文件夹: %s", project_folder_path
-                                    )
-
-                                    # 重命名整个项目文件夹并尝试链接组
-                                    _handle_project_folder_backup(
-                                        project_folder_path,
-                                        group,
-                                        backup_suffix,
-                                        exclude_groups,
-                                        stats,
-                                    )
-
-                                    # 重新获取组的详细状态
-                                    detailed_result = subprocess.run(
-                                        ["tuckr", "status", group, "--json"],
-                                        capture_output=True,
-                                        text=True,
-                                    )
-
-                                    if detailed_result.stdout:
-                                        detailed_status = json.loads(detailed_result.stdout)
-                                        group_conflicts = detailed_status.get("conflicts", {})
-                                    else:
-                                        logging.warning("无法获取组 '%s' 的状态输出", group)
-                                        break
-                                else:
-                                    logging.warning(
-                                        "无法找到组 '%s' 的项目根目录", group
-                                    )
-                                    stats["warnings"] += 1
-                                    break
-
-                                retry_count += 1
-
-                            # 检查最终是否还有冲突
-                            final_conflicts = group_conflicts.get(group, []) if isinstance(group_conflicts, dict) and group in group_conflicts else []
-                            if not final_conflicts:
-                                logging.info("  组 '%s' 的冲突已解决", group)
-                                stats["not_symlinked_processed"] += 1
-                            else:
-                                logging.warning("  组 '%s' 可能仍有冲突未能解决", group)
-                        else:
-                            # 无冲突，直接尝试链接
-                            logging.info("链接组: %s", group)
-                            if _run_tuckr_add(group, exclude_groups, stats, is_conflict_resolution=False):
-                                logging.debug("成功链接 %s", group)
-                                stats["not_symlinked_processed"] += 1
-                    else:
-                        # 未在冲突列表中，直接尝试链接
-                        logging.info("链接组: %s", group)
-                        if _run_tuckr_add(group, exclude_groups, stats, is_conflict_resolution=False):
-                            logging.debug("成功链接 %s", group)
-                            stats["not_symlinked_processed"] += 1
-                else:
-                    logging.warning("无法获取组 '%s' 的状态输出", group)
-                    stats["warnings"] += 1
-            except json.JSONDecodeError as e:
-                logging.error("解码组 '%s' 的详细JSON时出错: %s", group, e)
-                stats["errors"] += 1
-
-    # 不支持的组
-    unsupported_groups = status_data.get("unsupported", [])
-    logging.debug("不支持组数量: %d", len(unsupported_groups))
-    if unsupported_groups:
-        for group in unsupported_groups:
-            logging.warning("组 '%s' 不支持当前平台/条件", group)
-            stats["unsupported_printed"] += 1
-
-    # 不存在的组
-    non_existent_groups = status_data.get("nonexistent", []) or status_data.get(
-        "non_existent", []
-    )
-    logging.debug("不存在组数量: %d", len(non_existent_groups))
-    if non_existent_groups:
-        for group in non_existent_groups:
-            logging.warning("组 '%s' 不存在 (检查拼写或缺失的dotfiles)", group)
-            stats["non_existent_printed"] += 1
-
-    # 最终摘要
-    logging.info("处理摘要:")
-    logging.info(
-        "总处理的组数: %s",
-        stats["not_symlinked_processed"] + stats["conflicts_processed"],
-    )
-    logging.info("成功添加/链接的组数: %s", stats["added_groups"])
-    logging.info("为备份重命名的文件夹: %s", stats["renamed_folders"])
-    logging.info("为备份重命名的文件: %s", stats["renamed_files"])
-    if stats["skipped_excluded"] > 0:
-        logging.warning("因排除而跳过的组: %s", stats["skipped_excluded"])
-    if stats["warnings"] > 0:
-        logging.warning("总警告数: %s", stats["warnings"])
-    if stats["errors"] > 0:
-        logging.error("总错误数: %s", stats["errors"])
-
+    stats.log_summary()
     return stats
 
 
+def valid_suffix(s):
+    """校验后缀是否为非空字符串"""
+    if not s.strip():
+        raise argparse.ArgumentTypeError("后缀不能为空或只包含空白字符。")
+    return s
+
+
 def main():
+    epilog_text = """
+使用示例:
+  1. 基本用法 (从管道读取):
+     tuckr status --json | python3 tuckr.py
+
+  2. 自定义备份后缀并排除某些组:
+     tuckr status --json | python3 tuckr.py --suffix my-backup --exclude nvim zsh
+
+  3. 启用详细日志输出:
+     tuckr status --json | python3 tuckr.py --verbose
+"""
     parser = argparse.ArgumentParser(
-        description="处理tuckr状态JSON输出以备份和解决冲突。"
+        description="处理tuckr状态JSON输出以备份和解决冲突。",
+        epilog=epilog_text,
+        formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument(
         "--suffix",
         default="backup",
-        help="追加到重命名备份文件/文件夹的后缀。默认为 'backup'。",
+        type=valid_suffix,
+        metavar="SUFFIX",
+        help="追加到重命名备份文件/文件夹的后缀。\n(默认: 'backup')",
     )
     parser.add_argument(
         "--exclude",
         nargs="*",
         default=[],
-        help="在运行tuckr add时要排除的组。接受多个值。",
+        metavar="GROUP",
+        help="在运行tuckr add时要排除的组列表。",
     )
     parser.add_argument(
         "--verbose",
@@ -378,8 +427,19 @@ def main():
 
     setup_logging(verbose=args.verbose, use_color=not args.no_color)
 
+    # 检查是否有来自stdin的输入
+    if sys.stdin.isatty():
+        logging.error("错误：此脚本需要从stdin接收tuckr的JSON输出。")
+        logging.info("请尝试这样运行: tuckr status --json | python3 %s", sys.argv[0])
+        sys.exit(1)
+
     logging.info("正在等待来自stdin的JSON输入...")
     json_input = sys.stdin.read()
+
+    if not json_input.strip():
+        logging.error("错误：从stdin读取的输入为空。没有要处理的数据。")
+        sys.exit(1)
+
     process_conflicts(json_input, args.suffix, args.exclude)
 
 
