@@ -46,7 +46,7 @@ let
     fi
 
     if [ -x "$tuckr_bin_path" ]; then
-      "$tuckr_bin_path" status --json | "${pkgs.python3}/bin/python3" "${./tuckr.py}" "''${PYTHON_ARGS[@]}"
+      "$tuckr_bin_path" status --json | "${pkgs.python3}/bin/python3" "${./tuckr.py}" "''${PYTHON_ARGS[@]}" || true
     else
       echo "[tuckr] ERROR: tuckr binary not found at $tuckr_bin_path"
       exit 1
