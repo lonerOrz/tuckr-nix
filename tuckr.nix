@@ -3,7 +3,6 @@
   rustPlatform,
   fetchFromGitHub,
 }:
-
 rustPlatform.buildRustPackage (finallAttrs: {
   pname = "tuckr";
   version = "0.12.0";
@@ -24,7 +23,7 @@ rustPlatform.buildRustPackage (finallAttrs: {
     homepage = "https://github.com/RaphGL/Tuckr";
     changelog = "https://github.com/RaphGL/Tuckr/releases/tag/${version}";
     license = licenses.gpl3Plus;
-    maintainers = with maintainers; [ lonerOrz ];
+    maintainers = with maintainers; [lonerOrz];
     mainProgram = "tuckr";
   };
 })

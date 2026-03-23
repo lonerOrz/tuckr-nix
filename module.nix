@@ -5,7 +5,6 @@
   ...
 }:
 with lib;
-
 let
   cfg = config.tuckr;
 
@@ -52,7 +51,6 @@ let
       exit 1
     fi
   '';
-
 in
 {
   options.tuckr = {
@@ -121,6 +119,7 @@ in
           description = "Tuckr auto-resolver for ${username}";
           wantedBy = [ "multi-user.target" ];
           after = [ "network.target" ];
+          restartTriggers = [ config.system.build.toplevel ];
           path = [
             pkgs.coreutils
             pkgs.python3
@@ -136,9 +135,9 @@ in
       }
     ) cfg.users;
 
-    # rebuild 后统一重启 system-wide 服务
+    # rebuild 后立即触发服务，确保首次生效
     system.activationScripts.postRebuildTuckr = lib.mkAfter ''
-      echo "Activating system-wide tuckr services..."
+      echo "[tuckr] Triggering tuckr services..."
       ${pkgs.systemd}/bin/systemctl daemon-reload
       ${lib.concatStringsSep "\n" (
         lib.mapAttrsToList (
@@ -148,7 +147,7 @@ in
           ''
         ) cfg.users
       )}
-      echo "Tuckr services activation complete."
+      echo "[tuckr] Activation complete."
     '';
   };
 }

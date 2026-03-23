@@ -10,9 +10,8 @@
     };
   };
 
-  outputs =
-    inputs@{ flake-parts, ... }:
-    flake-parts.lib.mkFlake { inherit inputs; } {
+  outputs = inputs @ {flake-parts, ...}:
+    flake-parts.lib.mkFlake {inherit inputs;} {
       systems = [
         "x86_64-linux"
         "aarch64-linux"
@@ -24,35 +23,37 @@
         inputs.treefmt-nix.flakeModule
       ];
 
-      perSystem =
-        { pkgs, self', ... }:
-        {
-          packages.default = pkgs.callPackage ./tuckr.nix { };
+      perSystem = {
+        pkgs,
+        self',
+        ...
+      }: {
+        packages.default = pkgs.callPackage ./tuckr.nix {};
 
-          devShells.default = pkgs.mkShell {
-            inputsFrom = [ self'.packages.default ];
-            packages = with pkgs; [
-              # Rust
-              cargo
-              rustc
-              rust-analyzer
-              rustfmt
-              clippy
-              cargo-watch
-              cargo-criterion
-              # Python
-              python3
-            ];
-          };
+        devShells.default = pkgs.mkShell {
+          inputsFrom = [self'.packages.default];
+          packages = with pkgs; [
+            # Rust
+            cargo
+            rustc
+            rust-analyzer
+            rustfmt
+            clippy
+            cargo-watch
+            cargo-criterion
+            # Python
+            python3
+          ];
+        };
 
-          treefmt = {
-            projectRootFile = "flake.nix";
-            programs = {
-              rustfmt.enable = true;
-              alejandra.enable = true;
-            };
+        treefmt = {
+          projectRootFile = "flake.nix";
+          programs = {
+            rustfmt.enable = true;
+            alejandra.enable = true;
           };
         };
+      };
 
       flake = {
         tuckrModules.default = import ./module.nix;
