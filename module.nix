@@ -124,7 +124,6 @@ in {
             description = "Tuckr auto-resolver for ${username}";
             wantedBy = ["multi-user.target"];
             after = ["network.target"];
-            restartTriggers = ["${config.system.build.toplevel}"];
             path = [
               pkgs.coreutils
               pkgs.python3
