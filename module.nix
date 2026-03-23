@@ -4,8 +4,7 @@
   pkgs,
   ...
 }:
-with lib;
-let
+with lib; let
   cfg = config.tuckr;
 
   # 每个用户实际执行 tuckr + tuckr.py 的脚本
@@ -51,8 +50,7 @@ let
       exit 1
     fi
   '';
-in
-{
+in {
   options.tuckr = {
     enable = mkEnableOption "Enable multi-user tuckr management";
 
@@ -84,56 +82,64 @@ in
                   };
                 })
               );
-              default = { };
+              default = {};
             };
           };
         })
       );
-      default = { };
+      default = {};
       description = "Per-user tuckr configuration";
     };
   };
 
   config = mkIf cfg.enable {
-    environment.systemPackages = [ cfg.package ];
+    environment.systemPackages = [cfg.package];
 
     # system-wide service per user
-    systemd.services = lib.mapAttrs' (
-      username: userCfg:
-      let
-        enabled_groups_csv = lib.concatStringsSep "," (
-          lib.filter (s: s != "") (
-            builtins.attrValues (lib.mapAttrs (n: v: if v.enable then n else "") userCfg.group)
-          )
-        );
-        # 禁用的组
-        disabled_groups_csv = lib.concatStringsSep "," (
-          lib.filter (s: s != "") (
-            builtins.attrValues (lib.mapAttrs (n: v: if !v.enable then n else "") userCfg.group)
-          )
-        );
-      in
-      {
-        name = "tuckr-auto-resolver-${username}";
-        value = lib.mkIf userCfg.enable {
-          description = "Tuckr auto-resolver for ${username}";
-          wantedBy = [ "multi-user.target" ];
-          after = [ "network.target" ];
-          restartTriggers = [ config.system.build.toplevel ];
-          path = [
-            pkgs.coreutils
-            pkgs.python3
-            cfg.package
-          ];
-          serviceConfig = {
-            Type = "oneshot";
-            User = username;
-            Environment = "HOME=/home/${username}";
-            ExecStart = "${userTuckrActivatorScript} ${cfg.package}/bin/tuckr ${userCfg.dotPath} ${userCfg.backupSuffix} ${disabled_groups_csv}";
+    systemd.services =
+      lib.mapAttrs' (
+        username: userCfg: let
+          enabled_groups_csv = lib.concatStringsSep "," (
+            lib.filter (s: s != "") (
+              builtins.attrValues (lib.mapAttrs (n: v:
+                if v.enable
+                then n
+                else "")
+              userCfg.group)
+            )
+          );
+          # 禁用的组
+          disabled_groups_csv = lib.concatStringsSep "," (
+            lib.filter (s: s != "") (
+              builtins.attrValues (lib.mapAttrs (n: v:
+                if !v.enable
+                then n
+                else "")
+              userCfg.group)
+            )
+          );
+        in {
+          name = "tuckr-auto-resolver-${username}";
+          value = lib.mkIf userCfg.enable {
+            description = "Tuckr auto-resolver for ${username}";
+            wantedBy = ["multi-user.target"];
+            after = ["network.target"];
+            restartTriggers = [config.system.build.toplevel];
+            path = [
+              pkgs.coreutils
+              pkgs.python3
+              cfg.package
+            ];
+            serviceConfig = {
+              Type = "oneshot";
+              User = username;
+              Environment = "HOME=/home/${username}";
+              ExecStart = "${userTuckrActivatorScript} ${cfg.package}/bin/tuckr ${userCfg.dotPath} ${userCfg.backupSuffix} ${disabled_groups_csv}";
+            };
           };
-        };
-      }
-    ) cfg.users;
+        }
+      )
+      cfg.users;
 
     # rebuild 后立即触发服务，确保首次生效
     system.activationScripts.postRebuildTuckr = lib.mkAfter ''
@@ -142,10 +148,11 @@ in
       ${lib.concatStringsSep "\n" (
         lib.mapAttrsToList (
           username: userCfg:
-          lib.optionalString userCfg.enable ''
-            ${pkgs.systemd}/bin/systemctl restart tuckr-auto-resolver-${username}.service || true
-          ''
-        ) cfg.users
+            lib.optionalString userCfg.enable ''
+              ${pkgs.systemd}/bin/systemctl restart tuckr-auto-resolver-${username}.service || true
+            ''
+        )
+        cfg.users
       )}
       echo "[tuckr] Activation complete."
     '';
